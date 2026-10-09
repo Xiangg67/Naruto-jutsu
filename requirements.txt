@@ -1,0 +1,7 @@
+opencv-python
+pygame
+mediapipe
+scikit-learn
+pandas
+numpy
+joblib

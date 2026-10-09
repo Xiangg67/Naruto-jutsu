@@ -1,0 +1,6 @@
+# Virtual environment (can be recreated from requirements.txt)
+venv/
+
+# Python's automatic cache files
+__pycache__/
+*.pyc
