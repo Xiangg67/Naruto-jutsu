@@ -12,6 +12,7 @@ import mediapipe as mp
 import pygame
 
 from effects import Particle
+from features import get_hand_label
 
 WIDTH, HEIGHT = 960, 540  # window size
 FPS = 30                  # frames per second we aim for
@@ -71,14 +72,6 @@ def find_hands(detector, rgb, timestamp_ms):
     """Ask MediaPipe where the hands are in this RGB frame."""
     image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
     return detector.detect_for_video(image, timestamp_ms)
-
-
-def get_hand_label(handedness):
-    """Return "Left" or "Right" as the USER sees it in the mirrored picture.
-    MediaPipe assumes the picture is NOT mirrored, so its answer is the opposite
-    of what we want. We flip it here."""
-    label = handedness[0].category_name
-    return "Right" if label == "Left" else "Left"
 
 
 def draw_hands(screen, result, font):

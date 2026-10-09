@@ -100,6 +100,12 @@ naruto-jutsu/
 ### Stage 8 (optional): Polish
 - Chakra aura, smoke puff, shadow clone using MediaPipe image segmentation, more jutsu, background music, simple on-screen UI.
 
+## Decisions made along the way
+- MediaPipe can't track both hands during overlapping seals (tiger/ram/snake), so for Stages 4-6 we use four
+  two-hand shapes where the hands stay apart and visible: palms, fists, points, peace (+ none).
+  Real Naruto seals come later via Stage 7 (YOLO, user has an NVIDIA GPU). Sequence/effects code stays unchanged.
+- Python 3.13 venv (3.10/3.11 not installed). Always run scripts with `.\venv\Scripts\python.exe`.
+
 ## Known pitfalls
 - Without a "none" class, the model always guesses a seal, even with hands at rest.
 - MediaPipe loses tracking when both hands overlap heavily. This is the signal to consider Stage 7.
