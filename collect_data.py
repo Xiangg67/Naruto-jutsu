@@ -41,17 +41,23 @@ LABELS = [
 
 
 def load_existing():
-    """Read the CSV (if it exists). Return how many samples each label has
-    and the biggest session number used so far."""
+    """Read the CSV (if it exists). Return, for each label, how many USABLE samples
+    it has and which sessions they came from, plus the biggest session number so far.
+    "Usable" matches train.py: a seal row needs both hands (older recordings may not)."""
     counts = {name: 0 for _, name in LABELS}
+    sessions = {name: set() for _, name in LABELS}
     last_session = 0
     if os.path.exists(CSV_PATH):
         data = pd.read_csv(CSV_PATH)
-        for label, how_many in data["label"].value_counts().items():
-            counts[label] = int(how_many)
         if len(data) > 0:
             last_session = int(data["session_id"].max())
-    return counts, last_session
+        both_hands = (data["left_present"] == 1) & (data["right_present"] == 1)
+        usable = data[(data["label"] == "none") | both_hands]
+        for label, rows in usable.groupby("label"):
+            if label in counts:
+                counts[label] = len(rows)
+                sessions[label] = set(rows["session_id"])
+    return counts, sessions, last_session
 
 
 def save_rows(rows):
@@ -68,10 +74,10 @@ def save_rows(rows):
     print(f"Saved {len(rows)} samples to {CSV_PATH}")
 
 
-def draw_status(screen, font, big_font, label, counts, session_id, recording, hands_found):
+def draw_status(screen, font, big_font, label, counts, sessions, session_id, recording, hands_found):
     """Draw the info text on top of the camera picture."""
     # Dark box so the text is easy to read
-    panel = pygame.Surface((330, 250))
+    panel = pygame.Surface((400, 250))
     panel.set_alpha(170)
     panel.fill((0, 0, 0))
     screen.blit(panel, (10, 10))
@@ -82,7 +88,8 @@ def draw_status(screen, font, big_font, label, counts, session_id, recording, ha
     for _, name in LABELS:
         marker = ">" if name == label else " "
         color = (255, 255, 255) if name == label else (170, 170, 170)
-        screen.blit(font.render(f"{marker} {name}: {counts[name]}", True, color), (20, y))
+        text = f"{marker} {name}: {counts[name]} rows, {len(sessions[name])} sessions"
+        screen.blit(font.render(text, True, color), (20, y))
         y += 26
 
     screen.blit(font.render(f"Hands seen: {hands_found}   Session: {session_id}", True, (255, 255, 255)), (20, y + 4))
@@ -90,7 +97,7 @@ def draw_status(screen, font, big_font, label, counts, session_id, recording, ha
 
     if recording:
         pygame.draw.circle(screen, (255, 40, 40), (WIDTH - 40, 40), 16)
-        screen.blit(big_font.render("REC", True, (255, 40, 40)), (WIDTH - 110, 22))
+        screen.blit(big_font.render("REC", True, (255, 40, 40)), (WIDTH - 130, 22))
 
 
 def main():
@@ -109,7 +116,7 @@ def main():
     detector = create_hand_detector()
     last_timestamp = -1
 
-    counts, session_id = load_existing()
+    counts, sessions, session_id = load_existing()
     label = LABELS[0][1]   # start on "none"
     recording = False
     rows = []              # samples recorded during the current SPACE hold
@@ -155,11 +162,12 @@ def main():
             features = [round(x, 5) for x in build_features(result)]
             rows.append([session_id, label] + features)
             counts[label] += 1
+            sessions[label].add(session_id)
 
         # 4. Draw
         screen.blit(rgb_to_surface(rgb), (0, 0))
         draw_hands(screen, result, font)
-        draw_status(screen, font, big_font, label, counts, session_id, recording, hands_found)
+        draw_status(screen, font, big_font, label, counts, sessions, session_id, recording, hands_found)
         if recording and label != "none" and hands_found < 2:
             warning = big_font.render("Need BOTH hands visible - not saving!", True, (255, 60, 60))
             screen.blit(warning, (WIDTH // 2 - warning.get_width() // 2, HEIGHT - 60))
