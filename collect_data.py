@@ -147,10 +147,11 @@ def main():
         result = find_hands(detector, rgb, timestamp)
         hands_found = len(result.hand_landmarks)
 
-        # 3. Record a sample. For a real seal we skip frames where no hand is
-        #    visible (that would teach the wrong thing). "none" keeps everything,
-        #    because "no hands" is a normal part of "none".
-        if recording and (label == "none" or hands_found > 0):
+        # 3. Record a sample. All our seals use BOTH hands, so for a seal we skip
+        #    frames where MediaPipe lost a hand (saving those would teach the model
+        #    that "one hand" means a seal). "none" keeps everything, because one
+        #    hand, two hands or no hands are all normal parts of "none".
+        if recording and (label == "none" or hands_found == 2):
             features = [round(x, 5) for x in build_features(result)]
             rows.append([session_id, label] + features)
             counts[label] += 1
@@ -159,6 +160,9 @@ def main():
         screen.blit(rgb_to_surface(rgb), (0, 0))
         draw_hands(screen, result, font)
         draw_status(screen, font, big_font, label, counts, session_id, recording, hands_found)
+        if recording and label != "none" and hands_found < 2:
+            warning = big_font.render("Need BOTH hands visible - not saving!", True, (255, 60, 60))
+            screen.blit(warning, (WIDTH // 2 - warning.get_width() // 2, HEIGHT - 60))
         pygame.display.flip()
         clock.tick(FPS)
 

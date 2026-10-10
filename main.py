@@ -1,25 +1,33 @@
-"""Stage 3: mirrored webcam + fire on the F key + MediaPipe hand tracking.
+"""Stage 5: mirrored webcam + fire on F + hand tracking + live seal prediction.
 
 OpenCV only grabs frames from the camera.
 MediaPipe finds the hands (21 landmark points per hand).
+The trained classifier (from train.py) guesses which seal you are making.
 pygame draws everything on screen.
 """
 
 import sys
+from collections import deque
 
 import cv2
+import joblib
 import mediapipe as mp
+import numpy as np
 import pygame
 
 from effects import Particle
-from features import get_hand_label
+from features import build_features, get_hand_label
 
 WIDTH, HEIGHT = 960, 540  # window size
 FPS = 30                  # frames per second we aim for
 PARTICLES_PER_FRAME = 6   # how much fire to make each frame while F is held
 MAX_PARTICLES = 400       # safety limit so the game never gets slow
 
+SMOOTH_FRAMES = 5         # average the guess over this many frames to stop flicker
+MIN_CONFIDENCE = 0.6      # ignore guesses the model is less sure about than this
+
 MODEL_PATH = "models/hand_landmarker.task"
+SEAL_MODEL_PATH = "models/seal_classifier.pkl"
 HAND_CONNECTIONS = mp.tasks.vision.HandLandmarksConnections.HAND_CONNECTIONS  # which points join with a line
 
 # Colours for drawing each hand (R, G, B)
@@ -74,6 +82,53 @@ def find_hands(detector, rgb, timestamp_ms):
     return detector.detect_for_video(image, timestamp_ms)
 
 
+def load_seal_model():
+    """Load the classifier made by train.py (or None if it hasn't been trained yet)."""
+    try:
+        return joblib.load(SEAL_MODEL_PATH)
+    except FileNotFoundError:
+        print("No trained model found. Run train.py first - running without seal prediction.")
+        return None
+
+
+def predict_probabilities(model, result):
+    """How likely is each label right now? Returns one number per label; they add up to 1."""
+    labels = list(model.classes_)
+    if len(result.hand_landmarks) < 2:
+        # All our seals use both hands, so with fewer than 2 hands it can only be "none"
+        probabilities = np.zeros(len(labels))
+        probabilities[labels.index("none")] = 1.0
+        return probabilities
+    return model.predict_proba([build_features(result)])[0]
+
+
+def pick_seal(model, recent):
+    """Average the last few frames' guesses, then pick the winner.
+    Returns (seal name or None, confidence). "none" and unsure guesses give None."""
+    average = np.mean(recent, axis=0)
+    best = int(np.argmax(average))
+    label = model.classes_[best]
+    confidence = float(average[best])
+    if label == "none" or confidence < MIN_CONFIDENCE:
+        return None, confidence
+    return label, confidence
+
+
+def draw_prediction(screen, font, big_font, model, recent, seal, confidence):
+    """Show the detected seal at the bottom, with every label's chance underneath."""
+    if seal:
+        text = big_font.render(f"{seal.upper()}  {confidence:.0%}", True, (255, 220, 80))
+    else:
+        text = big_font.render("no seal", True, (170, 170, 170))
+    screen.blit(text, (WIDTH // 2 - text.get_width() // 2, HEIGHT - 90))
+
+    # Small line with the (smoothed) chance of each label, handy for checking stability
+    average = np.mean(recent, axis=0)
+    chances = "   ".join(f"{name} {p:.0%}" for name, p in zip(model.classes_, average))
+    line = font.render(chances, True, (255, 255, 255))
+    screen.blit(line, (WIDTH // 2 - line.get_width() // 2, HEIGHT - 40))
+
+
 def draw_hands(screen, result, font):
     """Draw the landmarks (dots) and connections (lines) for every hand found."""
     for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
@@ -107,9 +162,13 @@ def main():
     pygame.display.set_caption("Naruto Jutsu")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("arial", 24)
+    big_font = pygame.font.SysFont("arial", 44, bold=True)
 
     detector = create_hand_detector()
     last_timestamp = -1  # MediaPipe needs each frame's timestamp to be bigger than the last
+
+    seal_model = load_seal_model()
+    recent = deque(maxlen=SMOOTH_FRAMES)  # the last few frames' guesses (old ones drop off automatically)
 
     # Load the fire sound (the game still works without it)
     try:
@@ -145,6 +204,12 @@ def main():
         last_timestamp = timestamp
         result = find_hands(detector, rgb, timestamp)
 
+        # 3b. Guess the seal (if we have a trained model)
+        seal, confidence = None, 0.0
+        if seal_model:
+            recent.append(predict_probabilities(seal_model, result))
+            seal, confidence = pick_seal(seal_model, recent)
+
         # 4. While F is held down, make new fire at the centre of the screen
         keys = pygame.key.get_pressed()
         if keys[pygame.K_f] and len(particles) < MAX_PARTICLES:
@@ -161,6 +226,8 @@ def main():
         draw_hands(screen, result, font)
         for p in particles:
             p.draw(screen)
+        if seal_model:
+            draw_prediction(screen, font, big_font, seal_model, recent, seal, confidence)
         hint = font.render("Hold F for fire - ESC to quit", True, (255, 255, 255))
         screen.blit(hint, (10, 10))
         pygame.display.flip()
