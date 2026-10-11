@@ -21,12 +21,12 @@ import cv2
 import pygame
 
 from main import WIDTH, HEIGHT, FPS, open_camera, prepare_frame, rgb_to_surface
+from seals import SEAL_NAMES
 
 RAW_DIR = "dataset/raw"
 SAVE_EVERY = 3  # save every 3rd frame (about 8 photos a second), so we don't get 100 identical photos
 
-# The order of SEAL_NAMES matters: the first one becomes YOLO class 0, and so on.
-SEAL_NAMES = ["tiger", "ram", "snake", "horse"]
+# Which number key picks which label (the seal names live in seals.py)
 LABELS = [
     (pygame.K_0, "none"),
     (pygame.K_1, SEAL_NAMES[0]),

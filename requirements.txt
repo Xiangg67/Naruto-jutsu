@@ -5,3 +5,8 @@ scikit-learn
 pandas
 numpy
 joblib
+ultralytics
+
+# Stage 7 (YOLO) also needs PyTorch with GPU support. Install it FIRST, with this command
+# (it is ~2.8 GB and needs ~10 GB of free disk), otherwise ultralytics installs a CPU-only one:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
