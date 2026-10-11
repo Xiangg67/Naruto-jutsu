@@ -4,3 +4,8 @@ venv/
 # Python's automatic cache files
 __pycache__/
 *.pyc
+
+# YOLO (Stage 7): photos of you and your room, and big training output, stay on this PC
+dataset/
+runs/
+yolo*.pt
