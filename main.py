@@ -7,6 +7,7 @@ pygame draws everything on screen (F makes test fire, H shows MediaPipe's hand s
 """
 
 import os
+import random
 import sys
 from collections import deque
 
@@ -15,18 +16,20 @@ import mediapipe as mp
 import numpy as np
 import pygame
 
-from effects import Particle, spawn_burst, warm_up_glows
+from effects import (Particle, spawn_aura, spawn_ring, spawn_smoke, run_effect, warm_up_glows,
+                     EFFECT_FRAMES, EFFECT_FLASH, EFFECT_SHAKE, EFFECT_TEXT)
 from features import get_hand_label
-from jutsu import JUTSUS, SealSequence
+from jutsu import JUTSUS, JUTSU_EFFECTS, JUTSU_SOUNDS, SealSequence
 
 WIDTH, HEIGHT = 960, 540  # window size
 FPS = 30                  # frames per second we aim for
 PARTICLES_PER_FRAME = 6   # how much fire to make each frame while F is held
 MAX_PARTICLES = 400       # safety limit so the game never gets slow
 
-BURST_FRAMES = 45         # the jutsu fire keeps growing for this many frames (1.5 s)
-MAX_BURST_PARTICLES = 700 # safety limit while the big fire is going
+MAX_BURST_PARTICLES = 700 # safety limit while a jutsu effect is going
 FLASH_SECONDS = 2.5       # how long the jutsu name stays on screen
+SCREEN_FLASH_FRAMES = 10  # the whole screen flashes for this many frames when a jutsu fires
+SHAKE_FRAMES = 14         # and shakes for this many frames
 
 YOLO_MODEL_PATH = "models/seal_yolo.pt"
 YOLO_SIZE = 640           # YOLO shrinks the picture so its long side is this many pixels
@@ -197,13 +200,21 @@ def load_sound(path):
         return None
 
 
+def draw_panel(screen, x, y, w, h, alpha=140):
+    """A dark see-through box, so white text stays easy to read on any camera picture."""
+    panel = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(panel, (0, 0, 0, alpha), (0, 0, w, h), border_radius=10)
+    screen.blit(panel, (x, y))
+
+
 def draw_sequence_info(screen, font, sequence, now):
     """Show the jutsu recipes, the seals confirmed so far, and the hold progress bar."""
-    # Recipes (top left, under the hint)
-    y = 40
-    for name, seals in JUTSUS.items():
-        line = font.render(f"{name}: {' > '.join(seals)}", True, (255, 255, 255))
-        screen.blit(line, (10, y))
+    # Recipes (top left, under the hint), on a dark panel
+    lines = [font.render(f"{name}: {' > '.join(seals)}", True, (255, 255, 255)) for name, seals in JUTSUS.items()]
+    draw_panel(screen, 6, 42, max(line.get_width() for line in lines) + 20, 26 * len(lines) + 12)
+    y = 48
+    for line in lines:
+        screen.blit(line, (16, y))
         y += 26
 
     # Seals confirmed so far (bottom middle, above the prediction)
@@ -220,7 +231,7 @@ def draw_sequence_info(screen, font, sequence, now):
     pygame.draw.rect(screen, (255, 255, 255), (bar_x, bar_y, bar_w, bar_h), 1)
 
 
-def draw_flash(screen, huge_font, name, age):
+def draw_flash(screen, huge_font, name, age, color):
     """Flash the jutsu name in the middle of the screen, fading out at the end."""
     if age > FLASH_SECONDS:
         return
@@ -228,11 +239,11 @@ def draw_flash(screen, huge_font, name, age):
     alpha = 255 if age < fade_start else int(255 * (1 - (age - fade_start) / (FLASH_SECONDS - fade_start)))
     words = f"{name} Jutsu!"
     shadow = huge_font.render(words, True, (0, 0, 0))
-    text = huge_font.render(words, True, (255, 140, 30))
+    text = huge_font.render(words, True, color)
     shadow.set_alpha(alpha)
     text.set_alpha(alpha)
     x = WIDTH // 2 - text.get_width() // 2
-    y = HEIGHT // 2 - 150
+    y = HEIGHT // 2 - 95   # below the recipe list, above the seal prompt
     screen.blit(shadow, (x + 4, y + 4))
     screen.blit(text, (x, y))
 
@@ -265,10 +276,19 @@ def main():
 
     fire_sound = load_sound("assets/fire.wav")    # test fire (F key)
     seal_sound = load_sound("assets/seal.wav")    # a short ding for each confirmed seal
-    jutsu_sound = load_sound("assets/jutsu.wav")  # the big sound when a jutsu fires
+    # Each jutsu has its own sound (see JUTSU_SOUNDS in jutsu.py)
+    jutsu_sounds = {name: load_sound("assets/" + file) for name, file in JUTSU_SOUNDS.items()}
 
-    particles = []  # all the fire blobs that are alive right now
-    burst_frames_left = 0                          # how long the jutsu fire still has to run
+    world = pygame.Surface((WIDTH, HEIGHT))        # camera + effects are drawn here, so they can shake
+    flash_surface = pygame.Surface((WIDTH, HEIGHT))  # a plain colour, laid over the screen for the flash
+
+    particles = []  # all the fire / chakra / smoke blobs that are alive right now
+    bolts = []      # lightning strikes that are alive right now
+    effect_kind = "fire"                           # which effect the last jutsu used
+    effect_age = 0                                 # frames since that effect started
+    effect_frames_left = 0                         # how long it still has to run (0 = none running)
+    flash_frames = 0                               # frames of screen flash left
+    shake_frames = 0                               # frames of screen shake left
     last_center = (WIDTH // 2, HEIGHT // 2)        # where the seal was last seen
     flash_name, flash_start = None, 0.0            # the jutsu name on screen and when it appeared
 
@@ -317,36 +337,75 @@ def main():
         if jutsu:
             # A whole jutsu! These lines run ONCE, at the moment it is recognised,
             # so the sound plays once (not every frame).
-            if jutsu_sound:
-                jutsu_sound.play()
-            burst_frames_left = BURST_FRAMES
+            sound = jutsu_sounds.get(jutsu)
+            if sound:
+                sound.play()
+            effect_kind = JUTSU_EFFECTS.get(jutsu, "fire")
+            effect_age, effect_frames_left = 0, EFFECT_FRAMES[effect_kind]
+            flash_frames, shake_frames = SCREEN_FLASH_FRAMES, SHAKE_FRAMES
             flash_name, flash_start = jutsu, now
-        elif confirmed and seal_sound:
-            seal_sound.play()  # one more seal confirmed
+        elif confirmed:
+            # One more seal confirmed: a ding, a puff of smoke and a small ring of chakra
+            if seal_sound:
+                seal_sound.play()
+            spawn_smoke(particles, last_center[0], last_center[1], count=4)
+            spawn_ring(particles, last_center[0], last_center[1], count=16, speed=(3, 6))
 
-        # 4. Fire: hold F for test fire at the centre; a jutsu makes a big fire at your hands
+        # 4. Effects
         keys = pygame.key.get_pressed()
         if keys[pygame.K_f] and len(particles) < MAX_PARTICLES:
             for _ in range(PARTICLES_PER_FRAME):
-                particles.append(Particle(WIDTH // 2, HEIGHT // 2))
-        if burst_frames_left > 0:
-            burst_frames_left -= 1
-            if len(particles) < MAX_BURST_PARTICLES:
-                spawn_burst(particles, last_center[0], last_center[1])
+                particles.append(Particle(WIDTH // 2, HEIGHT // 2))   # test fire at the centre
+        if best_box and seal and len(particles) < MAX_PARTICLES:
+            # Chakra gathers around the seal while you hold it, and grows as the hold fills up
+            spawn_aura(particles, best_box[:4], sequence.hold_progress(now))
+        if effect_frames_left > 0:
+            # The big jutsu effect, at your hands
+            run_effect(effect_kind, effect_age, last_center[0], last_center[1], particles, bolts)
+            effect_age += 1
+            effect_frames_left -= 1
+            if len(particles) > MAX_BURST_PARTICLES:
+                del particles[:len(particles) - MAX_BURST_PARTICLES]   # drop the oldest ones
 
-        # 5. Move every particle, then throw away the ones that faded out
+        # 5. Move everything, then throw away what has faded out
         for p in particles:
             p.update()
         particles = [p for p in particles if not p.is_dead()]
+        for b in bolts:
+            b.update()
+        bolts = [b for b in bolts if not b.is_dead()]
 
-        # 6. Draw: camera first, then hands and the seal box, then fire on top, then text
-        screen.blit(rgb_to_surface(rgb), (0, 0))
+        # 6. Draw. First the "world" (camera, hands, seal box, effects), which can shake.
+        world.blit(rgb_to_surface(rgb), (0, 0))
         if hands_result:
-            draw_hands(screen, hands_result, font)
+            draw_hands(world, hands_result, font)
         if best_box:
-            draw_seal_box(screen, font, best_box)
+            draw_seal_box(world, font, best_box)
         for p in particles:
-            p.draw(screen)
+            if not p.additive:
+                p.draw(world)        # smoke is painted first...
+        for p in particles:
+            if p.additive:
+                p.draw(world)        # ...then the glowing fire and chakra on top of it
+        for b in bolts:
+            b.draw(world)
+
+        shake_x = shake_y = 0
+        if shake_frames > 0:
+            strength = int(EFFECT_SHAKE[effect_kind] * shake_frames / SHAKE_FRAMES)  # shakes less and less
+            shake_x, shake_y = random.randint(-strength, strength), random.randint(-strength, strength)
+            shake_frames -= 1
+        screen.fill((0, 0, 0))
+        screen.blit(world, (shake_x, shake_y))
+
+        if flash_frames > 0:
+            flash_surface.fill(EFFECT_FLASH[effect_kind])
+            flash_surface.set_alpha(int(190 * flash_frames / SCREEN_FLASH_FRAMES))   # fades out quickly
+            screen.blit(flash_surface, (0, 0))
+            flash_frames -= 1
+
+        # Then the text, which stays still. A dark panel behind it keeps it readable.
+        draw_panel(screen, WIDTH // 2 - 290, HEIGHT - 172, 580, 168)
         if yolo:
             draw_prediction(screen, font, big_font, names, recent, seal, confidence)
         else:
@@ -354,9 +413,10 @@ def main():
             screen.blit(warning, (WIDTH // 2 - warning.get_width() // 2, HEIGHT - 60))
         draw_sequence_info(screen, font, sequence, now)
         if flash_name:
-            draw_flash(screen, huge_font, flash_name, now - flash_start)
+            draw_flash(screen, huge_font, flash_name, now - flash_start, EFFECT_TEXT[effect_kind])
         hint = font.render("F = test fire   H = hand skeleton   ESC = quit", True, (255, 255, 255))
-        screen.blit(hint, (10, 10))
+        draw_panel(screen, 6, 6, hint.get_width() + 20, 32)
+        screen.blit(hint, (16, 10))
         pygame.display.flip()
 
         # 7. Wait so we run at about 30 FPS

@@ -13,6 +13,24 @@ from collections import deque
 JUTSUS = {
     "Fireball": ["tiger", "horse", "snake"],
     "Thunder": ["ram", "snake", "snake"],
+    "Chakra Blast": ["horse", "ram", "tiger"],
+    "Smoke Bomb": ["snake", "tiger"],
+}
+
+# What each jutsu LOOKS like (see effects.py: "fire", "lightning", "chakra" or "smoke")
+JUTSU_EFFECTS = {
+    "Fireball": "fire",
+    "Thunder": "lightning",
+    "Chakra Blast": "chakra",
+    "Smoke Bomb": "smoke",
+}
+
+# What each jutsu SOUNDS like (files in the assets folder)
+JUTSU_SOUNDS = {
+    "Fireball": "jutsu.wav",
+    "Thunder": "thunder.wav",
+    "Chakra Blast": "chakra.wav",
+    "Smoke Bomb": "smoke.wav",
 }
 
 HOLD_TIME = 0.5          # seconds a seal must be held steadily to count
