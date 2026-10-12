@@ -1,23 +1,22 @@
-"""Stage 6: webcam + hand tracking + seal prediction + jutsu sequences.
+"""Stage 7: webcam + YOLO seal detection + jutsu sequences + fire effects.
 
 OpenCV only grabs frames from the camera.
-MediaPipe finds the hands (21 landmark points per hand).
-The trained classifier (from train.py) guesses which seal you are making.
+YOLO (trained by train_yolo.py) finds the seal in the picture, boxed, and names it.
 jutsu.py watches the seals go by and spots a complete jutsu.
-pygame draws everything on screen (and F still makes test fire).
+pygame draws everything on screen (F makes test fire, H shows MediaPipe's hand skeleton).
 """
 
+import os
 import sys
 from collections import deque
 
 import cv2
-import joblib
 import mediapipe as mp
 import numpy as np
 import pygame
 
 from effects import Particle, spawn_burst, warm_up_glows
-from features import build_features, get_hand_label
+from features import get_hand_label
 from jutsu import JUTSUS, SealSequence
 
 WIDTH, HEIGHT = 960, 540  # window size
@@ -29,11 +28,15 @@ BURST_FRAMES = 45         # the jutsu fire keeps growing for this many frames (1
 MAX_BURST_PARTICLES = 700 # safety limit while the big fire is going
 FLASH_SECONDS = 2.5       # how long the jutsu name stays on screen
 
-SMOOTH_FRAMES = 5         # average the guess over this many frames to stop flicker
-MIN_CONFIDENCE = 0.6      # ignore guesses the model is less sure about than this
+YOLO_MODEL_PATH = "models/seal_yolo.pt"
+YOLO_SIZE = 640           # YOLO shrinks the picture so its long side is this many pixels
+# On photos from sessions it had never seen, the real seals scored 0.66 or more, and
+# photos with NO seal never got above 0.5.
+YOLO_CONF = 0.4           # YOLO throws away boxes it is less than 40% sure about
+SMOOTH_FRAMES = 5         # average the last 5 frames to stop flicker
+MIN_CONFIDENCE = 0.5      # after averaging, a seal must reach this confidence to count
 
-MODEL_PATH = "models/hand_landmarker.task"
-SEAL_MODEL_PATH = "models/seal_classifier.pkl"
+MODEL_PATH = "models/hand_landmarker.task"  # MediaPipe's hand model (only used for the H overlay)
 HAND_CONNECTIONS = mp.tasks.vision.HandLandmarksConnections.HAND_CONNECTIONS  # which points join with a line
 
 # Colours for drawing each hand (R, G, B)
@@ -55,7 +58,8 @@ def open_camera():
 
 def prepare_frame(frame):
     """Mirror, resize and convert a camera frame to RGB.
-    EVERY script must prepare frames this way so the hand data always matches."""
+    EVERY script must prepare frames this way, so the picture always matches
+    what the models were trained on."""
     frame = cv2.flip(frame, 1)                       # mirror, like a real mirror
     frame = cv2.resize(frame, (WIDTH, HEIGHT))       # fit the window
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)    # OpenCV uses BGR, pygame and MediaPipe use RGB
@@ -65,6 +69,82 @@ def rgb_to_surface(rgb):
     """Turn an RGB frame into a pygame picture (surface)."""
     # OpenCV is (height, width), pygame is (width, height), so swap the first two axes
     return pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
+
+
+def load_yolo():
+    """Load the trained YOLO model. Returns (model, device), or (None, None) if it isn't trained yet."""
+    if not os.path.exists(YOLO_MODEL_PATH):
+        print(f"{YOLO_MODEL_PATH} not found. Run prepare_dataset.py and train_yolo.py first.")
+        return None, None
+
+    # Imported here (not at the top) because YOLO takes a few seconds to load, and
+    # the other scripts that borrow functions from this file don't need it.
+    import torch
+    from ultralytics import YOLO
+
+    model = YOLO(YOLO_MODEL_PATH)
+    device = 0 if torch.cuda.is_available() else "cpu"  # 0 = your graphics card
+    print("YOLO running on", "the GPU" if device == 0 else "the CPU (slow!)")
+    # The very first prediction is slow (the GPU wakes up), so do one now on a blank picture
+    model.predict(np.zeros((HEIGHT, WIDTH, 3), np.uint8), imgsz=YOLO_SIZE, device=device, verbose=False)
+    return model, device
+
+
+def find_seals(model, device, rgb):
+    """Ask YOLO which seals are in this frame.
+    Returns (scores, best):
+        scores = the best confidence for each seal (0 if YOLO didn't see that seal)
+        best   = (x1, y1, x2, y2, name, confidence) for the single surest box, or None"""
+    # YOLO expects OpenCV's blue-green-red order (like the photos it trained on),
+    # so we flip our RGB frame back. [:, :, ::-1] reverses the colour channels.
+    bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+    boxes = model.predict(bgr, imgsz=YOLO_SIZE, conf=YOLO_CONF, device=device, verbose=False)[0].boxes
+
+    scores = np.zeros(len(model.names))
+    best = None
+    for box in boxes:
+        class_id = int(box.cls[0])
+        confidence = float(box.conf[0])
+        scores[class_id] = max(scores[class_id], confidence)
+        if best is None or confidence > best[5]:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            best = (x1, y1, x2, y2, model.names[class_id], confidence)
+    return scores, best
+
+
+def pick_seal(names, recent):
+    """Average the last few frames, then pick the seal with the highest average.
+    Returns (seal name or None, confidence). Not sure enough gives None."""
+    average = np.mean(recent, axis=0)
+    best = int(np.argmax(average))
+    confidence = float(average[best])
+    if confidence < MIN_CONFIDENCE:
+        return None, confidence
+    return names[best], confidence
+
+
+def draw_prediction(screen, font, big_font, names, recent, seal, confidence):
+    """Show the detected seal at the bottom, with every seal's average score underneath."""
+    if seal:
+        text = big_font.render(f"{seal.upper()}  {confidence:.0%}", True, (255, 220, 80))
+    else:
+        text = big_font.render("no seal", True, (170, 170, 170))
+    screen.blit(text, (WIDTH // 2 - text.get_width() // 2, HEIGHT - 90))
+
+    # Small line with the (smoothed) score of each seal, handy for checking stability
+    average = np.mean(recent, axis=0)
+    scores = "   ".join(f"{name} {p:.0%}" for name, p in zip(names, average))
+    line = font.render(scores, True, (255, 255, 255))
+    screen.blit(line, (WIDTH // 2 - line.get_width() // 2, HEIGHT - 40))
+
+
+def draw_seal_box(screen, font, best):
+    """Draw the box YOLO found around the seal, with its name."""
+    x1, y1, x2, y2, name, confidence = best
+    color = (255, 220, 80)
+    pygame.draw.rect(screen, color, (x1, y1, x2 - x1, y2 - y1), 3)
+    tag = font.render(f"{name} {confidence:.0%}", True, (0, 0, 0), color)
+    screen.blit(tag, (x1, max(0, y1 - 28)))
 
 
 def create_hand_detector():
@@ -88,51 +168,24 @@ def find_hands(detector, rgb, timestamp_ms):
     return detector.detect_for_video(image, timestamp_ms)
 
 
-def load_seal_model():
-    """Load the classifier made by train.py (or None if it hasn't been trained yet)."""
-    try:
-        return joblib.load(SEAL_MODEL_PATH)
-    except FileNotFoundError:
-        print("No trained model found. Run train.py first - running without seal prediction.")
-        return None
+def draw_hands(screen, result, font):
+    """Draw the landmarks (dots) and connections (lines) for every hand found."""
+    for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
+        label = get_hand_label(handedness)  # "Left" or "Right"
+        color = HAND_COLORS.get(label, (255, 255, 255))
 
+        # Landmark positions are numbers from 0 to 1, so multiply by the window size
+        points = [(int(p.x * WIDTH), int(p.y * HEIGHT)) for p in landmarks]
 
-def predict_probabilities(model, result):
-    """How likely is each label right now? Returns one number per label; they add up to 1."""
-    labels = list(model.classes_)
-    if len(result.hand_landmarks) < 2:
-        # All our seals use both hands, so with fewer than 2 hands it can only be "none"
-        probabilities = np.zeros(len(labels))
-        probabilities[labels.index("none")] = 1.0
-        return probabilities
-    return model.predict_proba([build_features(result)])[0]
+        for connection in HAND_CONNECTIONS:
+            pygame.draw.line(screen, color, points[connection.start], points[connection.end], 3)
+        for point in points:
+            pygame.draw.circle(screen, (255, 255, 255), point, 5)
+            pygame.draw.circle(screen, color, point, 5, 2)
 
-
-def pick_seal(model, recent):
-    """Average the last few frames' guesses, then pick the winner.
-    Returns (seal name or None, confidence). "none" and unsure guesses give None."""
-    average = np.mean(recent, axis=0)
-    best = int(np.argmax(average))
-    label = model.classes_[best]
-    confidence = float(average[best])
-    if label == "none" or confidence < MIN_CONFIDENCE:
-        return None, confidence
-    return label, confidence
-
-
-def draw_prediction(screen, font, big_font, model, recent, seal, confidence):
-    """Show the detected seal at the bottom, with every label's chance underneath."""
-    if seal:
-        text = big_font.render(f"{seal.upper()}  {confidence:.0%}", True, (255, 220, 80))
-    else:
-        text = big_font.render("no seal", True, (170, 170, 170))
-    screen.blit(text, (WIDTH // 2 - text.get_width() // 2, HEIGHT - 90))
-
-    # Small line with the (smoothed) chance of each label, handy for checking stability
-    average = np.mean(recent, axis=0)
-    chances = "   ".join(f"{name} {p:.0%}" for name, p in zip(model.classes_, average))
-    line = font.render(chances, True, (255, 255, 255))
-    screen.blit(line, (WIDTH // 2 - line.get_width() // 2, HEIGHT - 40))
+        # Write "Left" / "Right" next to the wrist (landmark 0)
+        text = font.render(label, True, color)
+        screen.blit(text, (points[0][0] + 10, points[0][1] + 10))
 
 
 def load_sound(path):
@@ -142,15 +195,6 @@ def load_sound(path):
     except (pygame.error, FileNotFoundError):
         print(f"Could not load {path} - running without that sound.")
         return None
-
-
-def hands_center(result):
-    """Middle of all the hand points on screen, in pixels (None if no hands)."""
-    xs = [p.x for hand in result.hand_landmarks for p in hand]
-    ys = [p.y for hand in result.hand_landmarks for p in hand]
-    if not xs:
-        return None
-    return int(np.mean(xs) * WIDTH), int(np.mean(ys) * HEIGHT)
 
 
 def draw_sequence_info(screen, font, sequence, now):
@@ -193,26 +237,6 @@ def draw_flash(screen, huge_font, name, age):
     screen.blit(text, (x, y))
 
 
-def draw_hands(screen, result, font):
-    """Draw the landmarks (dots) and connections (lines) for every hand found."""
-    for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
-        label = get_hand_label(handedness)  # "Left" or "Right"
-        color = HAND_COLORS.get(label, (255, 255, 255))
-
-        # Landmark positions are numbers from 0 to 1, so multiply by the window size
-        points = [(int(p.x * WIDTH), int(p.y * HEIGHT)) for p in landmarks]
-
-        for connection in HAND_CONNECTIONS:
-            pygame.draw.line(screen, color, points[connection.start], points[connection.end], 3)
-        for point in points:
-            pygame.draw.circle(screen, (255, 255, 255), point, 5)
-            pygame.draw.circle(screen, color, point, 5, 2)
-
-        # Write "Left" / "Right" next to the wrist (landmark 0)
-        text = font.render(label, True, color)
-        screen.blit(text, (points[0][0] + 10, points[0][1] + 10))
-
-
 def main():
     cap = open_camera()
     if cap is None:
@@ -230,12 +254,14 @@ def main():
     huge_font = pygame.font.SysFont("arial", 90, bold=True)
     warm_up_glows()  # prepare the fire pictures now, so there is no stutter later
 
-    detector = create_hand_detector()
-    last_timestamp = -1  # MediaPipe needs each frame's timestamp to be bigger than the last
-
-    seal_model = load_seal_model()
-    recent = deque(maxlen=SMOOTH_FRAMES)  # the last few frames' guesses (old ones drop off automatically)
+    yolo, device = load_yolo()
+    names = list(yolo.names.values()) if yolo else []   # seal names, in YOLO's class order
+    recent = deque(maxlen=SMOOTH_FRAMES)  # the last few frames' scores (old ones drop off automatically)
     sequence = SealSequence()             # remembers confirmed seals and spots jutsu
+
+    hand_detector = None   # MediaPipe is only loaded if you press H
+    show_hands = False
+    last_timestamp = -1    # MediaPipe needs each frame's timestamp to be bigger than the last
 
     fire_sound = load_sound("assets/fire.wav")    # test fire (F key)
     seal_sound = load_sound("assets/seal.wav")    # a short ding for each confirmed seal
@@ -243,7 +269,7 @@ def main():
 
     particles = []  # all the fire blobs that are alive right now
     burst_frames_left = 0                          # how long the jutsu fire still has to run
-    last_center = (WIDTH // 2, HEIGHT // 2)        # where the hands were last seen
+    last_center = (WIDTH // 2, HEIGHT // 2)        # where the seal was last seen
     flash_name, flash_start = None, 0.0            # the jutsu name on screen and when it appeared
 
     running = True
@@ -259,6 +285,10 @@ def main():
                     # KEYDOWN happens ONCE per press (not every frame while held),
                     # so the sound plays once per press.
                     fire_sound.play()
+                elif event.key == pygame.K_h:
+                    show_hands = not show_hands
+                    if show_hands and hand_detector is None:
+                        hand_detector = create_hand_detector()
 
         # 2. Grab a frame from the camera and prepare it (mirror + RGB)
         ok, frame = cap.read()
@@ -266,16 +296,20 @@ def main():
             continue  # skip this round if the camera had no picture
         rgb = prepare_frame(frame)
 
-        # 3. Find the hands
-        timestamp = max(pygame.time.get_ticks(), last_timestamp + 1)
-        last_timestamp = timestamp
-        result = find_hands(detector, rgb, timestamp)
+        # 3. Find the seal with YOLO, and smooth it over the last few frames
+        seal, confidence, best_box = None, 0.0, None
+        if yolo:
+            scores, best_box = find_seals(yolo, device, rgb)
+            recent.append(scores)
+            seal, confidence = pick_seal(names, recent)
+            if best_box:  # remember where the seal is: the jutsu fire will appear there
+                last_center = (int((best_box[0] + best_box[2]) / 2), int((best_box[1] + best_box[3]) / 2))
 
-        # 3b. Guess the seal (if we have a trained model)
-        seal, confidence = None, 0.0
-        if seal_model:
-            recent.append(predict_probabilities(seal_model, result))
-            seal, confidence = pick_seal(seal_model, recent)
+        # 3b. Optional: MediaPipe's hand skeleton, only for show
+        hands_result = None
+        if show_hands:
+            last_timestamp = max(pygame.time.get_ticks(), last_timestamp + 1)
+            hands_result = find_hands(hand_detector, rgb, last_timestamp)
 
         # 3c. Feed the seal to the sequence matcher (it needs the time in seconds)
         now = pygame.time.get_ticks() / 1000
@@ -291,9 +325,6 @@ def main():
             seal_sound.play()  # one more seal confirmed
 
         # 4. Fire: hold F for test fire at the centre; a jutsu makes a big fire at your hands
-        center = hands_center(result)
-        if center:
-            last_center = center
         keys = pygame.key.get_pressed()
         if keys[pygame.K_f] and len(particles) < MAX_PARTICLES:
             for _ in range(PARTICLES_PER_FRAME):
@@ -308,24 +339,31 @@ def main():
             p.update()
         particles = [p for p in particles if not p.is_dead()]
 
-        # 6. Draw: camera first, then hands, then fire on top, then a hint text
+        # 6. Draw: camera first, then hands and the seal box, then fire on top, then text
         screen.blit(rgb_to_surface(rgb), (0, 0))
-        draw_hands(screen, result, font)
+        if hands_result:
+            draw_hands(screen, hands_result, font)
+        if best_box:
+            draw_seal_box(screen, font, best_box)
         for p in particles:
             p.draw(screen)
-        if seal_model:
-            draw_prediction(screen, font, big_font, seal_model, recent, seal, confidence)
+        if yolo:
+            draw_prediction(screen, font, big_font, names, recent, seal, confidence)
+        else:
+            warning = font.render("No YOLO model yet - run train_yolo.py", True, (255, 120, 120))
+            screen.blit(warning, (WIDTH // 2 - warning.get_width() // 2, HEIGHT - 60))
         draw_sequence_info(screen, font, sequence, now)
         if flash_name:
             draw_flash(screen, huge_font, flash_name, now - flash_start)
-        hint = font.render("Hold F for test fire - ESC to quit", True, (255, 255, 255))
+        hint = font.render("F = test fire   H = hand skeleton   ESC = quit", True, (255, 255, 255))
         screen.blit(hint, (10, 10))
         pygame.display.flip()
 
         # 7. Wait so we run at about 30 FPS
         clock.tick(FPS)
 
-    detector.close()
+    if hand_detector:
+        hand_detector.close()
     cap.release()
     pygame.quit()
 

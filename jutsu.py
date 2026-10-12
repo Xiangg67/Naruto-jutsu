@@ -7,15 +7,18 @@ camera or the screen, it only watches the seal names go by.
 from collections import deque
 
 # The jutsu and the seals needed, in order. Change these however you like!
-# A seal used twice in a row (like "palms" twice) needs a short "let go"
+# The names must match the seals YOLO knows (see seals.py).
+# A seal used twice in a row (like "snake" twice) needs a short "let go"
 # in between, otherwise holding it would count as only one.
 JUTSUS = {
-    "Fireball": ["palms", "fists", "points"],
-    "Thunder": ["peace", "palms", "palms"],
+    "Fireball": ["tiger", "horse", "snake"],
+    "Thunder": ["ram", "snake", "snake"],
 }
 
 HOLD_TIME = 0.5          # seconds a seal must be held steadily to count
 RELEASE_TIME = 0.15      # seconds of "no seal" that count as letting go
+DROPOUT_GRACE = 0.3      # if the seal is missed for less than this in the middle of a hold,
+                         # the hold carries on (cameras and YOLO miss a few frames sometimes)
 SEQUENCE_TIMEOUT = 3.0   # forget the seals so far if you pause this long
 
 
@@ -28,6 +31,7 @@ class SealSequence:
 
         self.candidate = None        # the seal being shown right now (None = no seal)
         self.candidate_since = 0.0   # when it started being shown
+        self.none_since = None       # when the current "no seal" stretch began (None = a seal is shown)
         self.counted = False         # did this hold already count as a confirmed seal?
         self.released = True         # have we let go since the last confirmed seal?
         self.last_confirmed = None   # the most recent confirmed seal
@@ -49,17 +53,27 @@ class SealSequence:
             self.history.clear()
             self.last_confirmed = None
 
+        # No seal this frame
+        if seal is None:
+            if self.none_since is None:
+                self.none_since = now          # the "no seal" stretch just began
+            none_for = now - self.none_since
+            if none_for >= RELEASE_TIME:
+                self.released = True           # long enough to count as "letting go"
+            # A short dropout in the middle of a hold that hasn't counted yet is
+            # forgiven: we keep the hold timer running instead of starting over.
+            if self.candidate is not None and not self.counted and none_for < DROPOUT_GRACE:
+                return None, None
+            self.candidate = None
+            self.counted = False
+            return None, None
+        self.none_since = None
+
         # Did the shown seal change? Then the hold timer starts again.
         if seal != self.candidate:
             self.candidate = seal
             self.candidate_since = now
             self.counted = False
-
-        # No seal: if it lasts a moment, that counts as "letting go"
-        if seal is None:
-            if now - self.candidate_since >= RELEASE_TIME:
-                self.released = True
-            return None, None
 
         # A seal is shown. Has it been held long enough, and not counted yet?
         if now - self.candidate_since < HOLD_TIME or self.counted:
