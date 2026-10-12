@@ -16,6 +16,7 @@ import mediapipe as mp
 import numpy as np
 import pygame
 
+from clones import create_segmenter, person_mask, make_entry, draw_clones, CLONE_SLOTS, HISTORY_FRAMES
 from effects import (Particle, spawn_aura, spawn_ring, spawn_smoke, run_effect, warm_up_glows,
                      EFFECT_FRAMES, EFFECT_FLASH, EFFECT_SHAKE, EFFECT_TEXT)
 from features import get_hand_label
@@ -30,6 +31,8 @@ MAX_BURST_PARTICLES = 700 # safety limit while a jutsu effect is going
 FLASH_SECONDS = 2.5       # how long the jutsu name stays on screen
 SCREEN_FLASH_FRAMES = 10  # the whole screen flashes for this many frames when a jutsu fires
 SHAKE_FRAMES = 14         # and shakes for this many frames
+CLONE_FRAMES = 150        # the shadow clones stay for this many frames (5 seconds)
+MUSIC_VOLUME = 0.3        # background music loudness, from 0 to 1 (kept low so the jutsu sounds stand out)
 
 YOLO_MODEL_PATH = "models/seal_yolo.pt"
 YOLO_SIZE = 640           # YOLO shrinks the picture so its long side is this many pixels
@@ -200,6 +203,15 @@ def load_sound(path):
         return None
 
 
+def clone_poof(particles, center, shift):
+    """A puff of smoke and a ring of chakra where a shadow clone appears or vanishes.
+    `shift` is how far to the side of you the clone stands."""
+    x = min(max(center[0] + shift, 40), WIDTH - 40)   # keep it on the screen
+    y = center[1] - 40
+    spawn_smoke(particles, x, y, count=7, scale=1.6)
+    spawn_ring(particles, x, y, count=18, speed=(3, 6))
+
+
 def draw_panel(screen, x, y, w, h, alpha=140):
     """A dark see-through box, so white text stays easy to read on any camera picture."""
     panel = pygame.Surface((w, h), pygame.SRCALPHA)
@@ -279,6 +291,20 @@ def main():
     # Each jutsu has its own sound (see JUTSU_SOUNDS in jutsu.py)
     jutsu_sounds = {name: load_sound("assets/" + file) for name, file in JUTSU_SOUNDS.items()}
 
+    segmenter = create_segmenter()                 # cuts you out of the picture (for the shadow clone)
+    clone_frames_left = 0                          # how long the clones stay (0 = no clones)
+    clone_history = deque(maxlen=HISTORY_FRAMES)   # the last few frames, so clones can copy you a moment late
+
+    # Background music (plays all the time, quietly; press M to switch it on and off)
+    music_on = False
+    try:
+        pygame.mixer.music.load("assets/music.wav")
+        pygame.mixer.music.set_volume(MUSIC_VOLUME)
+        pygame.mixer.music.play(-1)                # -1 = repeat forever
+        music_on = True
+    except (pygame.error, FileNotFoundError):
+        print("Could not load assets/music.wav - running without music.")
+
     world = pygame.Surface((WIDTH, HEIGHT))        # camera + effects are drawn here, so they can shake
     flash_surface = pygame.Surface((WIDTH, HEIGHT))  # a plain colour, laid over the screen for the flash
 
@@ -309,6 +335,9 @@ def main():
                     show_hands = not show_hands
                     if show_hands and hand_detector is None:
                         hand_detector = create_hand_detector()
+                elif event.key == pygame.K_m:
+                    music_on = not music_on
+                    pygame.mixer.music.set_volume(MUSIC_VOLUME if music_on else 0)
 
         # 2. Grab a frame from the camera and prepare it (mirror + RGB)
         ok, frame = cap.read()
@@ -344,6 +373,9 @@ def main():
             effect_age, effect_frames_left = 0, EFFECT_FRAMES[effect_kind]
             flash_frames, shake_frames = SCREEN_FLASH_FRAMES, SHAKE_FRAMES
             flash_name, flash_start = jutsu, now
+            if effect_kind == "clone":
+                clone_frames_left = CLONE_FRAMES   # the clones start now
+                clone_history.clear()
         elif confirmed:
             # One more seal confirmed: a ding, a puff of smoke and a small ring of chakra
             if seal_sound:
@@ -367,6 +399,23 @@ def main():
             if len(particles) > MAX_BURST_PARTICLES:
                 del particles[:len(particles) - MAX_BURST_PARTICLES]   # drop the oldest ones
 
+        # 4b. Shadow clones: copy you beside yourself for a few seconds
+        display_rgb = rgb      # the picture we SHOW (YOLO already looked at the plain one)
+        if clone_frames_left > 0:
+            clone_age = CLONE_FRAMES - clone_frames_left
+            clone_frames_left -= 1
+            if segmenter:
+                mask = person_mask(segmenter, rgb)
+                clone_history.append(make_entry(rgb, mask))
+                display_rgb = draw_clones(rgb, mask, clone_history)
+            for shift, delay in CLONE_SLOTS:
+                if clone_age == delay:             # each clone pops in once we remember enough frames
+                    clone_poof(particles, last_center, shift)
+            if clone_frames_left == 0:             # time is up: they all vanish in smoke
+                for shift, _ in CLONE_SLOTS:
+                    clone_poof(particles, last_center, shift)
+                clone_history.clear()
+
         # 5. Move everything, then throw away what has faded out
         for p in particles:
             p.update()
@@ -376,7 +425,7 @@ def main():
         bolts = [b for b in bolts if not b.is_dead()]
 
         # 6. Draw. First the "world" (camera, hands, seal box, effects), which can shake.
-        world.blit(rgb_to_surface(rgb), (0, 0))
+        world.blit(rgb_to_surface(display_rgb), (0, 0))
         if hands_result:
             draw_hands(world, hands_result, font)
         if best_box:
@@ -414,7 +463,7 @@ def main():
         draw_sequence_info(screen, font, sequence, now)
         if flash_name:
             draw_flash(screen, huge_font, flash_name, now - flash_start, EFFECT_TEXT[effect_kind])
-        hint = font.render("F = test fire   H = hand skeleton   ESC = quit", True, (255, 255, 255))
+        hint = font.render("F = test fire   H = hand skeleton   M = music   ESC = quit", True, (255, 255, 255))
         draw_panel(screen, 6, 6, hint.get_width() + 20, 32)
         screen.blit(hint, (16, 10))
         pygame.display.flip()

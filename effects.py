@@ -242,14 +242,16 @@ class Lightning:
 # ---------------------------------------------------------------- jutsu effects
 
 # How many frames each jutsu effect keeps running (30 frames = 1 second)
-EFFECT_FRAMES = {"fire": 45, "lightning": 36, "chakra": 40, "smoke": 30}
+EFFECT_FRAMES = {"fire": 45, "lightning": 36, "chakra": 40, "smoke": 30, "clone": 12}
 
 # The colour of the screen flash and how hard the screen shakes (pixels) for each effect
-EFFECT_FLASH = {"fire": (255, 190, 110), "lightning": (200, 220, 255), "chakra": (120, 180, 255), "smoke": (230, 230, 230)}
-EFFECT_SHAKE = {"fire": 6, "lightning": 11, "chakra": 8, "smoke": 3}
+EFFECT_FLASH = {"fire": (255, 190, 110), "lightning": (200, 220, 255), "chakra": (120, 180, 255),
+                "smoke": (230, 230, 230), "clone": (235, 235, 245)}
+EFFECT_SHAKE = {"fire": 6, "lightning": 11, "chakra": 8, "smoke": 3, "clone": 2}
 
 # The colour of the jutsu name that appears on screen
-EFFECT_TEXT = {"fire": (255, 140, 30), "lightning": (150, 195, 255), "chakra": (90, 175, 255), "smoke": (235, 235, 240)}
+EFFECT_TEXT = {"fire": (255, 140, 30), "lightning": (150, 195, 255), "chakra": (90, 175, 255),
+               "smoke": (235, 235, 240), "clone": (190, 225, 255)}
 
 
 def run_effect(kind, age, x, y, particles, bolts):
@@ -267,3 +269,8 @@ def run_effect(kind, age, x, y, particles, bolts):
         spawn_burst(particles, x, y, count=5, palette="chakra", scale=1.5)
     elif kind == "smoke":
         spawn_smoke(particles, x, y, count=12, scale=2.4)
+    elif kind == "clone":
+        if age == 0:                                  # a shock-wave where the seal was made
+            spawn_ring(particles, x, y, count=40)
+        # (the puffs of smoke where the clones appear are made in main.py, because
+        # only main.py knows where the clones are)

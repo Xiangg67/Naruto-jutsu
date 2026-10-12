@@ -15,14 +15,16 @@ JUTSUS = {
     "Thunder": ["ram", "snake", "snake"],
     "Chakra Blast": ["horse", "ram", "tiger"],
     "Smoke Bomb": ["snake", "tiger"],
+    "Shadow Clone": ["ram", "horse"],
 }
 
-# What each jutsu LOOKS like (see effects.py: "fire", "lightning", "chakra" or "smoke")
+# What each jutsu LOOKS like (see effects.py: "fire", "lightning", "chakra", "smoke" or "clone")
 JUTSU_EFFECTS = {
     "Fireball": "fire",
     "Thunder": "lightning",
     "Chakra Blast": "chakra",
     "Smoke Bomb": "smoke",
+    "Shadow Clone": "clone",
 }
 
 # What each jutsu SOUNDS like (files in the assets folder)
@@ -31,6 +33,7 @@ JUTSU_SOUNDS = {
     "Thunder": "thunder.wav",
     "Chakra Blast": "chakra.wav",
     "Smoke Bomb": "smoke.wav",
+    "Shadow Clone": "smoke.wav",
 }
 
 HOLD_TIME = 0.5          # seconds a seal must be held steadily to count
