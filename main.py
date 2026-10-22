@@ -36,11 +36,12 @@ MUSIC_VOLUME = 0.3        # background music loudness, from 0 to 1 (kept low so 
 
 YOLO_MODEL_PATH = "models/seal_yolo.pt"
 YOLO_SIZE = 640           # YOLO shrinks the picture so its long side is this many pixels
-# On photos from sessions it had never seen, the real seals scored 0.66 or more, and
-# photos with NO seal never got above 0.5.
-YOLO_CONF = 0.4           # YOLO throws away boxes it is less than 40% sure about
+# On photos from sessions it had never seen, tiger, ram and snake scored about 0.8, but
+# horse in a new room only about 0.4 (so these are low). A lone false box on a "none"
+# frame is averaged away by SMOOTH_FRAMES and the hold time.
+YOLO_CONF = 0.3           # YOLO throws away boxes it is less than 30% sure about
 SMOOTH_FRAMES = 5         # average the last 5 frames to stop flicker
-MIN_CONFIDENCE = 0.5      # after averaging, a seal must reach this confidence to count
+MIN_CONFIDENCE = 0.45     # after averaging, a seal must reach this confidence to count
 
 MODEL_PATH = "models/hand_landmarker.task"  # MediaPipe's hand model (only used for the H overlay)
 HAND_CONNECTIONS = mp.tasks.vision.HandLandmarksConnections.HAND_CONNECTIONS  # which points join with a line

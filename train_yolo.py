@@ -14,15 +14,13 @@ import shutil
 
 from ultralytics import YOLO, settings
 
-BASE_MODEL = "yolo11n.pt"            # the pre-trained starting point (in the project folder)
+BASE_MODEL = "yolo11s.pt"            # the pre-trained starting point (a bit bigger than yolo11n; downloaded on first use)
 DATA = "dataset/yolo/data.yaml"      # made by prepare_dataset.py
 FINAL_MODEL = "models/seal_yolo.pt"  # where we keep our trained model
 EPOCHS = 80                          # one epoch = one full pass over all training photos
 
 
 def main():
-    if not os.path.exists(BASE_MODEL):
-        raise SystemExit(f"{BASE_MODEL} not found in the project folder.")
     if not os.path.exists(DATA):
         raise SystemExit("dataset/yolo/data.yaml not found. Run prepare_dataset.py first.")
 
